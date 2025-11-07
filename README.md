@@ -67,12 +67,6 @@ python main.py
 - **Interactive confirmation** for uncertain matches (you'll be prompted to accept/reject)
 - Saves results to `data/{show_alias}/`
 
-**AI Matching Features:**
-- Automatically accepts high-confidence matches (distance < 15.0)
-- Prompts for confirmation on uncertain matches (distance 15.0-30.0)
-- Automatically rejects poor matches (distance > 30.0)
-- Understands that the same song can have different featured artists, subtitles, or remixes
-
 **Output files:**
 - `tracklists_with_spotify.json` - Complete episode data with Spotify URIs
 - `playlist_uris.json` - List of all matched Spotify track URIs
