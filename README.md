@@ -1,6 +1,6 @@
 # NTS Radio → Spotify Playlist Creator
 
-Automatically scrape tracklists from NTS Radio shows and create Spotify playlists with all discovered tracks. Uses AI-powered matching to intelligently find the best Spotify matches for each track.
+Automatically scrape tracklists from NTS Radio shows and create Spotify playlists with all discovered tracks. Uses AI-powered matching to intelligently find the best Spotify matches when track can't be programatically found.
 
 ## Features
 
