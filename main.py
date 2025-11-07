@@ -501,7 +501,8 @@ def full_scrape_and_search(spotify: SpotifyAPI, show_alias: str):
 
 def retry_failed_tracks(spotify: SpotifyAPI, show_alias: str):
     """Retry searching for tracks that weren't found"""
-    input_file = f'{show_alias}_tracklists_with_spotify.json'
+    data_dir = os.path.join('data', show_alias)
+    input_file = os.path.join(data_dir, 'tracklists_with_spotify.json')
     
     try:
         with open(input_file, 'r', encoding='utf-8') as f:
@@ -562,7 +563,7 @@ def retry_failed_tracks(spotify: SpotifyAPI, show_alias: str):
         'uris': all_uris
     }
     
-    playlist_file = f'{show_alias}_playlist_uris.json'
+    playlist_file = os.path.join(data_dir, 'playlist_uris.json')
     with open(playlist_file, 'w', encoding='utf-8') as f:
         json.dump(playlist_data, indent=2, fp=f)
     
@@ -575,7 +576,8 @@ def retry_failed_tracks(spotify: SpotifyAPI, show_alias: str):
 
 def create_spotify_playlist(spotify: SpotifyAPI, show_alias: str):
     """Create playlist on Spotify from saved URIs"""
-    playlist_file = f'{show_alias}_playlist_uris.json'
+    data_dir = os.path.join('data', show_alias)
+    playlist_file = os.path.join(data_dir, 'playlist_uris.json')
     
     try:
         with open(playlist_file, 'r', encoding='utf-8') as f:
