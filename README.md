@@ -42,7 +42,7 @@ SPOTIFY_CLIENT_SECRET=your_client_secret_here
 
 Run the script:
 ```bash
-python nts_to_spotify.py
+python main.py
 ```
 
 ### Workflow
