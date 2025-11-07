@@ -80,7 +80,7 @@ python nts_to_spotify.py
 
 ```
 project/
-├── nts_to_spotify.py
+├── main.py
 ├── .env
 ├── README.md
 └── data/
@@ -176,7 +176,6 @@ The script includes built-in delays to respect API rate limits:
 
 ## Notes
 
-- Playlists are created as **private** by default
 - The script uses multi-threading for faster episode processing
 - All data is stored locally - no external database required
 - Track matching is done by artist + title search (not always 100% accurate)
