@@ -12,7 +12,7 @@ from typing import Dict, Optional, List
 from dotenv import load_dotenv
 from tqdm import tqdm
 from colorama import Fore, Style, init
-
+from openai import OpenAI
 # Initialize colorama for cross-platform color support
 init(autoreset=True)
 
@@ -30,6 +30,10 @@ def thread_safe_print(*args, **kwargs):
 # Global variable to capture OAuth callback
 auth_code = None
 
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+SPOTIFY_SEARCH_MAX_WORKERS = 5
 
 def levenshtein_distance(s1: str, s2: str) -> int:
     """Calculate Levenshtein distance between two strings"""
@@ -61,7 +65,7 @@ def normalize_string(s: str) -> str:
 
 def find_best_match(original_artist: str, original_title: str, tracks: List[Dict], threshold: int = 15) -> Optional[Dict]:
     """
-    Find best match using Levenshtein distance.
+    Find best match using AI, then backup Levenshtein distance, then backup manual confirmation.
     threshold: maximum edit distance to consider (default 15)
     """
     original_artist_norm = normalize_string(original_artist)
@@ -69,6 +73,58 @@ def find_best_match(original_artist: str, original_title: str, tracks: List[Dict
     original_combined = f"{original_artist_norm} {original_title_norm}"
     
     best_match = None
+    # If AI fails, fallback to Levenshtein distance
+
+    prompt = f"Find the best match for: {original_artist} - {original_title} from the following options:\n"
+    for i, track in enumerate(tracks, 1):
+        spotify_artists = ", ".join([artist['name'] for artist in track.get('artists', [])])
+        spotify_title = track.get('name', '')
+        prompt += f"{i}. {spotify_artists} - {spotify_title}\n"
+    
+    prompt += "\nMatch if the candidate is clearly the SAME SONG/COMPOSITION, even if:\n"
+    prompt += "- Spotify lists fewer featured artists/collaborators\n"
+    prompt += "- Subtitles, dedications, or parenthetical info differ\n"
+    prompt += "- It's a different movement/part of the same classical work\n"
+    prompt += "- Track title is slightly simplified\n\n"
+    
+    prompt += "DO NOT match if:\n"
+    prompt += "- It's a completely different song (even by same artist)\n"
+    prompt += "- Only genre/mood is similar but different composition\n"
+    prompt += "- Wrong remix version (unless original has no remix specified)\n\n"
+    
+    prompt += "Respond with ONLY the number of the match, or 0 if none match the same song."
+    try:
+        # print(f"{Fore.YELLOW}Using AI to find best match for: {original_artist} - {original_title}")
+        response = client.chat.completions.create(
+            model="gpt-5-nano",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that finds the best matching song from a list."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=1
+        )
+        # print(response)
+        answer = response.choices[0].message.content.strip()
+        # print(f"{Fore.YELLOW}AI response: {answer}")
+        choice = int(answer)
+        if choice > 0 and choice <= len(tracks):
+            selected_track = tracks[choice - 1]
+            spotify_artists = ", ".join([artist['name'] for artist in selected_track.get('artists', [])])
+            spotify_title = selected_track.get('name', '')
+            # print(f"{Fore.GREEN}AI selected match: {spotify_artists} - {spotify_title} for {original_artist} - {original_title}")
+            return {
+                'uri': selected_track['uri'],
+                'spotify_artist': spotify_artists,
+                'spotify_title': spotify_title,
+                'original_artist': original_artist,
+                'original_title': original_title,
+                'distance': 0,
+                'needs_confirmation': False
+            }
+    except Exception as e:
+        print(f"{Fore.RED}✗ AI matching failed with error: {e}")
+        pass  # If AI fails, fallback to Levenshtein distance
+    
     best_distance = float('inf')
     
     for track in tracks:
@@ -323,11 +379,11 @@ class SpotifyAPI:
             pass
         
         # Second try: simple search with fuzzy matching
-        query = f"{artist} {title}"
+        query = f"{artist} - {title}"
         params = {
             "q": query,
             "type": "track",
-            "limit": 5  # Get multiple results for comparison
+            "limit": 10  # Get multiple results for comparison
         }
         
         try:
@@ -337,7 +393,9 @@ class SpotifyAPI:
             
             tracks = results.get("tracks", {}).get("items", [])
             if tracks:
-                # Find best match using Levenshtein distance
+                # print(f"{Fore.YELLOW}Fuzzy matching for: {artist} - {title}")
+                # for track in tracks:
+                #     print(f"  Found: {', '.join([a['name'] for a in track.get('artists', [])])} - {track.get('name')}")
                 best_match = find_best_match(artist, title, tracks)
                 if best_match:
                     return best_match['uri'], best_match['needs_confirmation'], best_match
@@ -659,7 +717,7 @@ def full_scrape_and_search(spotify: SpotifyAPI, show_alias: str):
     # Search all tracks in parallel
     if all_tracks:
         matched_tracks, all_pending_confirmations = search_tracks_on_spotify_parallel(
-            all_tracks, spotify, max_workers=3
+            all_tracks, spotify, max_workers=SPOTIFY_SEARCH_MAX_WORKERS
         )
         
         # Redistribute matched tracks back to their tapes
@@ -706,7 +764,7 @@ def full_scrape_and_search(spotify: SpotifyAPI, show_alias: str):
     playlist_data = {
         'show_alias': show_alias,
         'name': f'{show_alias.upper()} Collection',
-        'description': f'All tracks from {show_alias} shows on NTS Radio',
+        'description': f'Tracks from {show_alias} shows on NTS Radio, compiled by NTS Spotify Scraper',
         'total_tracks': len(all_uris),
         'uris': all_uris
     }
@@ -766,7 +824,7 @@ def retry_failed_tracks(spotify: SpotifyAPI, show_alias: str):
     
     # Search all failed tracks in parallel
     matched_tracks, pending_confirmations = search_tracks_on_spotify_parallel(
-        failed_tracks, spotify, max_workers=15
+        failed_tracks, spotify, max_workers=SPOTIFY_SEARCH_MAX_WORKERS
     )
     
     # Update the original tapes with results
@@ -828,7 +886,7 @@ def retry_failed_tracks(spotify: SpotifyAPI, show_alias: str):
     playlist_data = {
         'show_alias': show_alias,
         'name': f'{show_alias.upper()} Collection',
-        'description': f'All tracks from {show_alias} shows on NTS Radio',
+        'description': f'Tracks from {show_alias} shows on NTS Radio, compiled by NTS Spotify Scraper',
         'total_tracks': len(all_uris),
         'uris': all_uris
     }
