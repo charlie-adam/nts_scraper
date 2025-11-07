@@ -665,7 +665,7 @@ if __name__ == "__main__":
     spotify.get_access_token()
     
     # Get show alias
-    show_alias = input(f"\n{Fore.YELLOW}Enter NTS show alias (e.g., 'm00dtapes'): ").strip()
+    show_alias = input(f"\n{Fore.YELLOW}Enter NTS show alias (e.g., 'm00dtapes'): ").strip().lower()
     
     if not show_alias:
         print(f"{Fore.RED}✗ Show alias cannot be empty")
