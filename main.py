@@ -30,6 +30,121 @@ def thread_safe_print(*args, **kwargs):
 # Global variable to capture OAuth callback
 auth_code = None
 
+
+def levenshtein_distance(s1: str, s2: str) -> int:
+    """Calculate Levenshtein distance between two strings"""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    
+    return previous_row[-1]
+
+def normalize_string(s: str) -> str:
+    """Normalize string for comparison"""
+    import re
+    # Remove special characters, convert to lowercase, remove extra spaces
+    s = re.sub(r'[^\w\s]', '', s.lower())
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+def find_best_match(original_artist: str, original_title: str, tracks: List[Dict], threshold: int = 15) -> Optional[Dict]:
+    """
+    Find best match using Levenshtein distance.
+    threshold: maximum edit distance to consider (default 15)
+    """
+    original_artist_norm = normalize_string(original_artist)
+    original_title_norm = normalize_string(original_title)
+    original_combined = f"{original_artist_norm} {original_title_norm}"
+    
+    best_match = None
+    best_distance = float('inf')
+    
+    for track in tracks:
+        # Get Spotify track info
+        spotify_artists = ", ".join([artist['name'] for artist in track.get('artists', [])])
+        spotify_title = track.get('name', '')
+        
+        spotify_artist_norm = normalize_string(spotify_artists)
+        spotify_title_norm = normalize_string(spotify_title)
+        spotify_combined = f"{spotify_artist_norm} {spotify_title_norm}"
+        
+        # Calculate distances
+        combined_distance = levenshtein_distance(original_combined, spotify_combined)
+        title_distance = levenshtein_distance(original_title_norm, spotify_title_norm)
+        artist_distance = levenshtein_distance(original_artist_norm, spotify_artist_norm)
+        
+        # Weighted score (title is more important)
+        weighted_distance = (title_distance * 2 + artist_distance) / 3
+        
+        if weighted_distance < best_distance:
+            best_distance = weighted_distance
+            best_match = {
+                'uri': track['uri'],
+                'spotify_artist': spotify_artists,
+                'spotify_title': spotify_title,
+                'original_artist': original_artist,
+                'original_title': original_title,
+                'distance': weighted_distance,
+                'needs_confirmation': weighted_distance > threshold
+            }
+    
+    # Only return if within reasonable threshold (even for confirmation)
+    if best_match and best_match['distance'] <= threshold * 2:
+        return best_match
+    
+    return None
+
+def confirm_matches(pending_matches: List[Dict]) -> List[Dict]:
+    """
+    Show pending matches to user for confirmation.
+    Returns list of confirmed matches.
+    """
+    if not pending_matches:
+        return []
+    
+    print(f"\n{Fore.YELLOW}{'=' * 60}")
+    print(f"{Fore.YELLOW}MATCHES REQUIRING CONFIRMATION: {len(pending_matches)}")
+    print(f"{Fore.YELLOW}{'=' * 60}\n")
+    
+    confirmed = []
+    
+    for i, match in enumerate(pending_matches, 1):
+        print(f"{Fore.CYAN}[{i}/{len(pending_matches)}]")
+        print(f"{Fore.WHITE}Original: {Fore.YELLOW}{match['original_artist']} - {match['original_title']}")
+        print(f"{Fore.WHITE}Spotify:  {Fore.GREEN}{match['spotify_artist']} - {match['spotify_title']}")
+        print(f"{Fore.WHITE}Distance: {Fore.MAGENTA}{match['distance']:.1f}")
+        
+        while True:
+            response = input(f"{Fore.YELLOW}Accept this match? (y/n/q to quit): ").strip().lower()
+            if response in ['y', 'n', 'q']:
+                break
+            print(f"{Fore.RED}Invalid input. Please enter y, n, or q.")
+        
+        if response == 'q':
+            print(f"{Fore.YELLOW}Skipping remaining confirmations...")
+            break
+        elif response == 'y':
+            confirmed.append(match)
+            print(f"{Fore.GREEN}✓ Accepted\n")
+        else:
+            print(f"{Fore.RED}✗ Rejected\n")
+    
+    print(f"{Fore.GREEN}✓ Confirmed {len(confirmed)} out of {len(pending_matches)} matches")
+    return confirmed
+
+
 class OAuthCallbackHandler(BaseHTTPRequestHandler):
     """Handle OAuth callback from Spotify"""
     def do_GET(self):
@@ -169,14 +284,17 @@ class SpotifyAPI:
                 print(f"{Fore.RED}Response: {e.response.text}")
             return False
     
-    def search_song(self, artist: str, title: str) -> Optional[str]:
-        """Search for a song and return the Spotify URI of the best match"""
+    def search_song_with_fallback(self, artist: str, title: str) -> tuple[Optional[str], bool, Optional[Dict]]:
+        """
+        Search for a song and return the Spotify URI of the best match.
+        Returns: (uri, needs_confirmation, match_data)
+        """
         if not self.access_token:
             if not self.get_access_token():
-                return None
+                return None, False, None
         
+        # First try: structured search
         query = f"artist:{artist} track:{title}"
-        
         url = "https://api.spotify.com/v1/search"
         headers = {
             "Authorization": f"Bearer {self.access_token}"
@@ -194,12 +312,41 @@ class SpotifyAPI:
             
             tracks = results.get("tracks", {}).get("items", [])
             if tracks:
-                return tracks[0]["uri"]
-            return None
-            
+                return tracks[0]["uri"], False, None
         except requests.exceptions.RequestException as e:
-            return None
-    
+            # print(f"{Fore.RED}✗ Error during structured search: {e}")
+            #if 429 Client Error
+            if e.response.status_code == 429:
+                print(f"{Fore.YELLOW}Rate limit exceeded. Retrying...")
+                time.sleep(2)
+                self.search_song_with_fallback(artist, title)
+            pass
+        
+        # Second try: simple search with fuzzy matching
+        query = f"{artist} {title}"
+        params = {
+            "q": query,
+            "type": "track",
+            "limit": 5  # Get multiple results for comparison
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            results = response.json()
+            
+            tracks = results.get("tracks", {}).get("items", [])
+            if tracks:
+                # Find best match using Levenshtein distance
+                best_match = find_best_match(artist, title, tracks)
+                if best_match:
+                    return best_match['uri'], best_match['needs_confirmation'], best_match
+            
+            return None, False, None
+                
+        except requests.exceptions.RequestException:
+            return None, False, None
+
     def get_user_id(self) -> Optional[str]:
         """Get the current user's Spotify ID"""
         if not self.user_token:
@@ -389,34 +536,74 @@ def process_episode(episode, delay=0.3):
     
     return tape_data
 
-def search_tracks_on_spotify(tracks: List[Dict], spotify: SpotifyAPI, delay=0.1) -> List[Dict]:
-    """Search for tracks on Spotify and return matches with URIs"""
-    matched_tracks = []
+def search_single_track(track: Dict, spotify: SpotifyAPI) -> Dict:
+    """Search for a single track on Spotify"""
+    artist = track['artist']
+    title = track['title']
     
-    with tqdm(total=len(tracks), desc=f"{Fore.CYAN}Searching Spotify", unit="track") as pbar:
-        for track in tracks:
-            artist = track['artist']
-            title = track['title']
-            
-            uri = spotify.search_song(artist, title)
-            
-            if uri:
-                matched_tracks.append({
-                    **track,
-                    'spotify_uri': uri,
-                    'found': True
-                })
-            else:
-                matched_tracks.append({
-                    **track,
-                    'spotify_uri': None,
-                    'found': False
-                })
-            
-            pbar.update(1)
-            time.sleep(delay)
+    uri, needs_confirmation, match_data = spotify.search_song_with_fallback(artist, title)
     
-    return matched_tracks
+    if uri:
+        track_result = {
+            **track,
+            'spotify_uri': uri,
+            'found': True
+        }
+        
+        if needs_confirmation and match_data:
+            track_result['pending_confirmation'] = True
+            track_result['match_data'] = match_data
+        
+        return track_result
+    else:
+        return {
+            **track,
+            'spotify_uri': None,
+            'found': False
+        }
+
+def search_tracks_on_spotify_parallel(tracks: List[Dict], spotify: SpotifyAPI, max_workers: int = 1) -> tuple[List[Dict], List[Dict]]:
+    """
+    Search for tracks on Spotify in parallel and return matches with URIs.
+    Returns: (matched_tracks, pending_confirmations)
+    """
+    matched_tracks = [None] * len(tracks)  # Pre-allocate list to maintain order
+    pending_confirmations = []
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_index = {
+            executor.submit(search_single_track, track, spotify): i 
+            for i, track in enumerate(tracks)
+        }
+        
+        # Process completed tasks with progress bar
+        with tqdm(total=len(tracks), desc=f"{Fore.CYAN}Searching Spotify", unit="track") as pbar:
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    result = future.result()
+                    matched_tracks[index] = result
+                    
+                    # Check if needs confirmation
+                    if result.get('pending_confirmation') and result.get('match_data'):
+                        pending_confirmations.append({
+                            **result['match_data'],
+                            'track_index': index
+                        })
+                    
+                    pbar.update(1)
+                    time.sleep(0.2)  # Small delay to avoid rate limiting
+                except Exception as e:
+                    # If search fails, mark as not found
+                    matched_tracks[index] = {
+                        **tracks[index],
+                        'spotify_uri': None,
+                        'found': False
+                    }
+                    pbar.update(1)
+    
+    return matched_tracks, pending_confirmations
 
 def full_scrape_and_search(spotify: SpotifyAPI, show_alias: str):
     """Complete scrape of NTS and search on Spotify"""
@@ -455,13 +642,54 @@ def full_scrape_and_search(spotify: SpotifyAPI, show_alias: str):
     all_tapes.sort(key=lambda x: x['broadcast'], reverse=True)
     
     print(f"\n{Fore.CYAN}{'=' * 60}")
-    print(f"{Fore.CYAN}STEP 3: Searching tracks on Spotify...")
+    print(f"{Fore.CYAN}STEP 3: Searching tracks on Spotify (parallel)...")
     print(f"{Fore.CYAN}{'=' * 60}\n")
     
-    for tape in tqdm(all_tapes, desc=f"{Fore.CYAN}Processing episodes", unit="episode"):
+    # Collect all tracks from all episodes
+    all_tracks = []
+    tape_track_mapping = []  # Keep track of which tracks belong to which tape
+    
+    for tape_idx, tape in enumerate(all_tapes):
+        tape_start = len(all_tracks)
         if tape['track_count'] > 0:
-            matched_tracks = search_tracks_on_spotify(tape['tracklist'], spotify, delay=0.1)
-            tape['tracklist'] = matched_tracks
+            all_tracks.extend(tape['tracklist'])
+        tape_end = len(all_tracks)
+        tape_track_mapping.append((tape_idx, tape_start, tape_end))
+    
+    # Search all tracks in parallel
+    if all_tracks:
+        matched_tracks, all_pending_confirmations = search_tracks_on_spotify_parallel(
+            all_tracks, spotify, max_workers=3
+        )
+        
+        # Redistribute matched tracks back to their tapes
+        for tape_idx, start_idx, end_idx in tape_track_mapping:
+            all_tapes[tape_idx]['tracklist'] = matched_tracks[start_idx:end_idx]
+        
+        # Confirm fuzzy matches
+        if all_pending_confirmations:
+            confirmed_matches = confirm_matches(all_pending_confirmations)
+            
+            # Update tracks based on confirmations
+            confirmed_indices = {m['track_index'] for m in confirmed_matches}
+            rejection_count = 0
+            
+            # Find and update rejected matches
+            current_index = 0
+            for tape in all_tapes:
+                for track in tape['tracklist']:
+                    if track.get('pending_confirmation'):
+                        if current_index not in confirmed_indices:
+                            # User rejected this match
+                            track['spotify_uri'] = None
+                            track['found'] = False
+                            rejection_count += 1
+                        # Clean up temporary fields
+                        track.pop('pending_confirmation', None)
+                        track.pop('match_data', None)
+                    current_index += 1
+            
+            print(f"\n{Fore.CYAN}✓ Rejected {rejection_count} fuzzy matches")
     
     # Save results
     output_file = os.path.join(data_dir, 'tracklists_with_spotify.json')
@@ -498,7 +726,7 @@ def full_scrape_and_search(spotify: SpotifyAPI, show_alias: str):
     print(f"{Fore.GREEN}✓ Match rate: {len(all_uris)/total_tracks*100:.1f}%")
     print(f"\n{Fore.YELLOW}✓ Full data saved to: {output_file}")
     print(f"{Fore.YELLOW}✓ Playlist URIs saved to: {playlist_file}")
-
+     
 def retry_failed_tracks(spotify: SpotifyAPI, show_alias: str):
     """Retry searching for tracks that weren't found"""
     data_dir = os.path.join('data', show_alias)
@@ -513,36 +741,78 @@ def retry_failed_tracks(spotify: SpotifyAPI, show_alias: str):
         return
     
     print(f"\n{Fore.CYAN}{'=' * 60}")
-    print(f"{Fore.CYAN}Retrying failed track searches...")
+    print(f"{Fore.CYAN}Retrying failed track searches (parallel)...")
     print(f"{Fore.CYAN}{'=' * 60}\n")
     
-    # Count failed tracks
-    failed_tracks = []
-    for tape in all_tapes:
-        for i, track in enumerate(tape['tracklist']):
+    # Collect failed tracks with their positions
+    failed_tracks_info = []
+    for tape_idx, tape in enumerate(all_tapes):
+        for track_idx, track in enumerate(tape['tracklist']):
             if not track.get('found', False):
-                failed_tracks.append((tape, i, track))
+                failed_tracks_info.append({
+                    'tape_idx': tape_idx,
+                    'track_idx': track_idx,
+                    'track': track
+                })
     
-    if not failed_tracks:
+    if not failed_tracks_info:
         print(f"{Fore.GREEN}✓ No failed tracks to retry!")
         return
     
-    total_found = 0
+    print(f"{Fore.CYAN}Found {len(failed_tracks_info)} failed tracks to retry\n")
     
-    with tqdm(total=len(failed_tracks), desc=f"{Fore.CYAN}Retrying tracks", unit="track") as pbar:
-        for tape, idx, track in failed_tracks:
-            artist = track['artist']
-            title = track['title']
+    # Extract just the tracks for searching
+    failed_tracks = [info['track'] for info in failed_tracks_info]
+    
+    # Search all failed tracks in parallel
+    matched_tracks, pending_confirmations = search_tracks_on_spotify_parallel(
+        failed_tracks, spotify, max_workers=15
+    )
+    
+    # Update the original tapes with results
+    total_found = 0
+    for i, info in enumerate(failed_tracks_info):
+        result = matched_tracks[i]
+        tape_idx = info['tape_idx']
+        track_idx = info['track_idx']
+        
+        all_tapes[tape_idx]['tracklist'][track_idx] = result
+        
+        if result.get('found'):
+            total_found += 1
             
-            uri = spotify.search_song(artist, title)
+            # Add position info to pending confirmations
+            if result.get('pending_confirmation'):
+                for confirmation in pending_confirmations:
+                    if confirmation.get('track_index') == i:
+                        confirmation['tape_idx'] = tape_idx
+                        confirmation['track_idx'] = track_idx
+                        break
+    
+    # Confirm fuzzy matches
+    if pending_confirmations:
+        confirmed_matches = confirm_matches(pending_confirmations)
+        
+        # Update tracks based on confirmations
+        confirmed_set = {(m['tape_idx'], m['track_idx']) for m in confirmed_matches}
+        rejection_count = 0
+        
+        for match in pending_confirmations:
+            tape_idx = match['tape_idx']
+            track_idx = match['track_idx']
             
-            if uri:
-                tape['tracklist'][idx]['spotify_uri'] = uri
-                tape['tracklist'][idx]['found'] = True
-                total_found += 1
+            if (tape_idx, track_idx) not in confirmed_set:
+                # User rejected this match
+                all_tapes[tape_idx]['tracklist'][track_idx]['spotify_uri'] = None
+                all_tapes[tape_idx]['tracklist'][track_idx]['found'] = False
+                total_found -= 1
+                rejection_count += 1
             
-            pbar.update(1)
-            time.sleep(0.1)
+            # Clean up temporary field
+            all_tapes[tape_idx]['tracklist'][track_idx].pop('pending_confirmation', None)
+            all_tapes[tape_idx]['tracklist'][track_idx].pop('match_data', None)
+        
+        print(f"\n{Fore.CYAN}✓ Rejected {rejection_count} fuzzy matches")
     
     # Save updated results
     with open(input_file, 'w', encoding='utf-8') as f:
@@ -570,10 +840,10 @@ def retry_failed_tracks(spotify: SpotifyAPI, show_alias: str):
     print(f"\n{Fore.GREEN}{'=' * 60}")
     print(f"{Fore.GREEN}RETRY COMPLETE!")
     print(f"{Fore.GREEN}{'=' * 60}")
-    print(f"{Fore.GREEN}✓ Tracks retried: {len(failed_tracks)}")
+    print(f"{Fore.GREEN}✓ Tracks retried: {len(failed_tracks_info)}")
     print(f"{Fore.GREEN}✓ New matches found: {total_found}")
     print(f"{Fore.GREEN}✓ Total tracks in playlist: {len(all_uris)}")
-
+    
 def create_spotify_playlist(spotify: SpotifyAPI, show_alias: str):
     """Create playlist on Spotify from saved URIs"""
     data_dir = os.path.join('data', show_alias)
