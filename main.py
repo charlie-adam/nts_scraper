@@ -763,8 +763,8 @@ def full_scrape_and_search(spotify: SpotifyAPI, show_alias: str):
     
     playlist_data = {
         'show_alias': show_alias,
-        'name': f'{show_alias.upper()} Collection',
-        'description': f'Tracks from {show_alias} shows on NTS Radio, compiled by NTS Spotify Scraper (https://github.com/charlie-adam/nts_scraper)',
+        'name': f'NTS RADIO - {show_alias.upper()} Collection',
+        'description': f'Tracks from {show_alias} shows on NTS Radio, compiled by (https://github.com/charlie-adam/nts_scraper)',
         'total_tracks': len(all_uris),
         'uris': all_uris
     }
@@ -885,8 +885,8 @@ def retry_failed_tracks(spotify: SpotifyAPI, show_alias: str):
     
     playlist_data = {
         'show_alias': show_alias,
-        'name': f'{show_alias.upper()} Collection',
-        'description': f'Tracks from {show_alias} shows on NTS Radio, compiled by NTS Spotify Scraper (https://github.com/charlie-adam/nts_scraper)',
+        'name': f'NTS RADIO - {show_alias.upper()} Collection',
+        'description': f'Tracks from {show_alias} shows on NTS Radio, compiled by (https://github.com/charlie-adam/nts_scraper)',
         'total_tracks': len(all_uris),
         'uris': all_uris
     }
